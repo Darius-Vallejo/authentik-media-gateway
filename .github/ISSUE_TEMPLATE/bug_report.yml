@@ -1,0 +1,53 @@
+name: Bug report
+description: Report a bug or unexpected behavior
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report a bug. Please fill out the sections below.
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: A clear description of the bug
+      placeholder: What happened? What did you expect?
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: How can we reproduce this?
+      placeholder: |
+        1. Start services with `make up`
+        2. Call GET /presigned-url with ...
+        3. ...
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: How are you running the app?
+      placeholder: |
+        - OS: (e.g. macOS, Linux)
+        - Python: (e.g. 3.11)
+        - Run mode: (Docker / local with make dev)
+        - S3/MinIO: (local MinIO, AWS S3, other)
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs / error output
+      description: Relevant log lines or stack traces (redact secrets)
+      render: shell
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: Checklist
+      options:
+        - label: I have searched existing issues for duplicates
+          required: true
+        - label: I have read the README and followed the Quick Start
+          required: false
