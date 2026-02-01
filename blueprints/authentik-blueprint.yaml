@@ -1,0 +1,243 @@
+# =============================================================================
+# Authentik Media Gateway - Blueprint Template
+# =============================================================================
+#
+# This blueprint creates a sample flow for testing the media gateway integration.
+# It includes:
+#   - A Flow named "media-bridge-test"
+#   - A Prompt Stage with hidden fields for evidence_ref and profile
+#   - An Expression Policy that calls the media gateway's /verify endpoint
+#
+# INSTALLATION:
+# 1. Import this blueprint in Authentik Admin > System > Blueprints
+# 2. Or use the API: POST /api/v3/blueprints/instances/
+#
+# CONFIGURATION:
+# Before importing, update the following:
+#   - MEDIA_GATEWAY_URL: Change from host.docker.internal to your actual host
+#   - Profile names: Adjust to match your verification requirements
+#
+# =============================================================================
+
+version: 1
+metadata:
+  name: Media Gateway Integration
+  labels:
+    blueprints.goauthentik.io/description: "Media verification flow using authentik-media-gateway"
+    blueprints.goauthentik.io/instantiate: "false"
+
+entries:
+  # ---------------------------------------------------------------------------
+  # Flow: media-bridge-test
+  # ---------------------------------------------------------------------------
+  # This flow demonstrates how to integrate with the media gateway.
+  # In production, you would embed these stages into your authentication flows.
+  # ---------------------------------------------------------------------------
+  - model: authentik_flows.flow
+    id: flow-media-bridge-test
+    attrs:
+      name: Media Bridge Test
+      slug: media-bridge-test
+      title: Media Verification Test
+      designation: authentication
+      # Set to true to allow unauthenticated access for testing
+      # In production, this would typically be part of an enrollment or MFA flow
+      compatibility_mode: true
+
+  # ---------------------------------------------------------------------------
+  # Prompt Stage: media-evidence-prompt
+  # ---------------------------------------------------------------------------
+  # This stage collects the evidence_ref and profile from the client.
+  # In a real implementation, these would be populated by JavaScript on the
+  # frontend after the user uploads media via the presigned URL.
+  #
+  # The fields are hidden because they're meant to be set programmatically,
+  # not by direct user input.
+  # ---------------------------------------------------------------------------
+  - model: authentik_stages_prompt.promptstage
+    id: stage-media-evidence-prompt
+    attrs:
+      name: Media Evidence Prompt
+      fields:
+        # Evidence reference from presigned URL response
+        - field_key: evidence_ref
+          label: Evidence Reference
+          type: text
+          required: true
+          placeholder: "bucket/uploads/voice/file.wav"
+          # Hide from user - populated by frontend JavaScript
+          # sub_text: "S3 reference to uploaded media"
+          order: 0
+
+        # Verification profile (determines which processor to use)
+        - field_key: profile
+          label: Verification Profile
+          type: text
+          required: true
+          placeholder: "voice.login.default"
+          # Hide from user - set by the flow logic
+          order: 1
+
+        # Subject ID - typically the username or user ID
+        - field_key: subject_id
+          label: Subject ID
+          type: text
+          required: true
+          placeholder: "user_123"
+          order: 2
+
+  # ---------------------------------------------------------------------------
+  # Expression Policy: verify-media-policy
+  # ---------------------------------------------------------------------------
+  # This policy calls the media gateway's /verify endpoint and evaluates
+  # the response to determine if the user should proceed.
+  #
+  # IMPORTANT: Update MEDIA_GATEWAY_URL to match your deployment:
+  #   - Docker on same host: http://host.docker.internal:8000
+  #   - Docker network: http://media-gateway-api:8000
+  #   - Kubernetes: http://media-gateway.namespace.svc.cluster.local:8000
+  #   - External: https://media-gateway.example.com
+  # ---------------------------------------------------------------------------
+  - model: authentik_policies_expression.expressionpolicy
+    id: policy-verify-media
+    attrs:
+      name: Verify Media Policy
+      # Python expression that runs during flow execution
+      expression: |
+        import requests
+        from json import dumps
+
+        # =======================================================================
+        # CONFIGURATION - Update these values for your environment
+        # =======================================================================
+
+        # Media Gateway URL
+        # Change this to match your deployment:
+        #   - Docker on same host: http://host.docker.internal:8000
+        #   - Docker Compose network: http://media-gateway-api:8000
+        #   - Kubernetes: http://media-gateway.namespace.svc.cluster.local:8000
+        MEDIA_GATEWAY_URL = "http://host.docker.internal:8000"
+
+        # Minimum confidence threshold for verification to pass
+        MIN_CONFIDENCE = 0.7
+
+        # Request timeout in seconds
+        REQUEST_TIMEOUT = 30
+
+        # =======================================================================
+        # POLICY LOGIC - Typically no changes needed below
+        # =======================================================================
+
+        # Get values from the prompt stage
+        evidence_ref = request.context.get("prompt_data", {}).get("evidence_ref", "")
+        profile = request.context.get("prompt_data", {}).get("profile", "")
+        subject_id = request.context.get("prompt_data", {}).get("subject_id", "")
+
+        # Validate required fields
+        if not evidence_ref:
+            ak_message("Missing evidence reference")
+            return False
+
+        if not profile:
+            ak_message("Missing verification profile")
+            return False
+
+        if not subject_id:
+            # Fall back to username if available
+            subject_id = request.user.username if request.user else ""
+            if not subject_id:
+                ak_message("Missing subject ID")
+                return False
+
+        # Build verification request
+        verify_url = f"{MEDIA_GATEWAY_URL}/verify"
+        payload = {
+            "evidence_ref": evidence_ref,
+            "profile": profile,
+            "subject_id": subject_id
+        }
+
+        try:
+            # Call the media gateway
+            response = requests.post(
+                verify_url,
+                json=payload,
+                timeout=REQUEST_TIMEOUT,
+                headers={"Content-Type": "application/json"}
+            )
+
+            # Check for HTTP errors
+            if response.status_code != 200:
+                error_detail = response.json().get("detail", {})
+                error_msg = error_detail.get("detail", "Unknown error") if isinstance(error_detail, dict) else str(error_detail)
+                ak_message(f"Verification failed: {error_msg}")
+                return False
+
+            # Parse response
+            result = response.json()
+            valid = result.get("valid", False)
+            confidence = result.get("confidence", 0.0)
+            reason = result.get("reason", "No reason provided")
+
+            # Check if verification passed
+            if not valid:
+                ak_message(f"Verification failed: {reason}")
+                return False
+
+            # Check confidence threshold
+            if confidence < MIN_CONFIDENCE:
+                ak_message(f"Confidence too low: {confidence:.2f} (minimum: {MIN_CONFIDENCE})")
+                return False
+
+            # Store result in context for later stages
+            request.context["media_verification"] = {
+                "valid": valid,
+                "confidence": confidence,
+                "reason": reason,
+                "metadata": result.get("metadata", {})
+            }
+
+            ak_message(f"Verification passed (confidence: {confidence:.2f})")
+            return True
+
+        except requests.exceptions.Timeout:
+            ak_message("Verification timed out. Please try again.")
+            return False
+        except requests.exceptions.ConnectionError:
+            ak_message("Could not connect to verification service.")
+            return False
+        except Exception as e:
+            ak_message(f"Verification error: {str(e)}")
+            return False
+
+  # ---------------------------------------------------------------------------
+  # Stage Bindings
+  # ---------------------------------------------------------------------------
+  # Connect the prompt stage to the flow
+  # ---------------------------------------------------------------------------
+  - model: authentik_flows.flowstagebinding
+    id: binding-media-prompt
+    attrs:
+      target: !KeyOf flow-media-bridge-test
+      stage: !KeyOf stage-media-evidence-prompt
+      order: 10
+      # Apply the verification policy to this stage
+      policy_engine_mode: any
+      evaluate_on_plan: false
+      re_evaluate_policies: true
+
+  # ---------------------------------------------------------------------------
+  # Policy Binding
+  # ---------------------------------------------------------------------------
+  # Bind the verification policy to the prompt stage
+  # ---------------------------------------------------------------------------
+  - model: authentik_policies.policybinding
+    id: binding-verify-policy
+    attrs:
+      target: !KeyOf binding-media-prompt
+      policy: !KeyOf policy-verify-media
+      order: 0
+      enabled: true
+      # Run after form submission
+      negate: false
+      timeout: 30
