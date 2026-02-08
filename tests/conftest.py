@@ -9,6 +9,20 @@ import pytest
 from fastapi.testclient import TestClient
 
 
+# Torchaudio 2.1+ removed list_audio_backends(); SpeechBrain still expects it. Patch before app load.
+@pytest.fixture(scope="session")
+def patch_torchaudio_backends() -> Generator[None, None, None]:
+    """Add list_audio_backends to torchaudio if missing (compat with torchaudio 2.1+)."""
+    try:
+        import torchaudio
+
+        if not hasattr(torchaudio, "list_audio_backends"):
+            torchaudio.list_audio_backends = lambda: ["soundfile"]
+    except ImportError:
+        pass
+    yield
+
+
 # Set test environment variables before importing app modules
 @pytest.fixture(scope="session", autouse=True)
 def setup_test_env() -> Generator[None, None, None]:
@@ -60,7 +74,7 @@ def mock_s3_client() -> Generator[MagicMock, None, None]:
 
 
 @pytest.fixture
-def client(mock_s3_client: MagicMock) -> TestClient:
+def client(mock_s3_client: MagicMock, patch_torchaudio_backends: None) -> TestClient:
     """Create a test client with mocked dependencies."""
     from app.main import app
 
@@ -68,7 +82,7 @@ def client(mock_s3_client: MagicMock) -> TestClient:
 
 
 @pytest.fixture
-def client_no_mock() -> TestClient:
+def client_no_mock(patch_torchaudio_backends: None) -> TestClient:
     """Create a test client without S3 mocking (for health checks)."""
     from app.main import app
 
@@ -116,8 +130,8 @@ def _create_minimal_wav() -> bytes:
     header.extend(b"data")
     header.extend(struct.pack("<I", data_size))
 
-    # Add minimal audio data (silence)
-    header.extend(b"\x00" * min(data_size, 1000))
+    # Add full 1 second of silence (ECAPA-TDNN needs minimum ~1s of audio)
+    header.extend(b"\x00" * data_size)
 
     return bytes(header)
 

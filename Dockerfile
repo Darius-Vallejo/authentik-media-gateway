@@ -30,6 +30,13 @@ ENV PATH="/opt/venv/bin:$PATH"
 RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir .
 
+# Pre-download SpeechBrain ECAPA-TDNN model (patch torchaudio 2.1+ compat before import)
+RUN /opt/venv/bin/python -c "\
+import torchaudio; \
+getattr(torchaudio, 'list_audio_backends', None) or setattr(torchaudio, 'list_audio_backends', lambda: ['soundfile']); \
+from speechbrain.inference.classifiers import EncoderClassifier; \
+EncoderClassifier.from_hparams(source='speechbrain/spkrec-ecapa-voxceleb', savedir='/build/pretrained_models/spkrec-ecapa-voxceleb', run_opts={'device': 'cpu'})"
+
 # -----------------------------------------------------------------------------
 # Stage 2: Runtime
 # -----------------------------------------------------------------------------
@@ -52,6 +59,9 @@ ENV PATH="/opt/venv/bin:$PATH"
 
 # Copy application code (app is installed in venv; copy for runtime)
 COPY src/app ./app
+
+# Copy pre-downloaded voice model from builder
+COPY --from=builder /build/pretrained_models /app/pretrained_models
 
 # Change ownership to non-root user
 RUN chown -R appuser:appgroup /app

@@ -82,3 +82,24 @@ def download_object(bucket: str, key: str, max_bytes: int) -> bytes:
         )
 
     return body
+
+
+def upload_object(bucket: str, key: str, body: bytes, content_type: str) -> None:
+    """Upload an object to S3.
+
+    Args:
+        bucket: The S3 bucket name.
+        key: The object key.
+        body: The object content as bytes.
+        content_type: The MIME type of the object (e.g. 'audio/wav').
+
+    Raises:
+        botocore.exceptions.ClientError: If the S3 operation fails.
+    """
+    client = get_s3_client()
+    client.put_object(
+        Bucket=bucket,
+        Key=key,
+        Body=body,
+        ContentType=content_type,
+    )

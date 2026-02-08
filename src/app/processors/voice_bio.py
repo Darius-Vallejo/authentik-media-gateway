@@ -1,33 +1,37 @@
-"""Voice biometrics processor for speaker verification.
+"""Voice biometrics processor for speaker verification using SpeechBrain ECAPA-TDNN."""
 
-This is a placeholder implementation that validates audio files and returns
-a mock verification result. It is structured to be easily replaced with
-a real SpeechBrain-based implementation.
-"""
-
-import struct
+import io
+import logging
 from typing import Any
 
+import soundfile as sf
+import torch
+from speechbrain.inference.classifiers import EncoderClassifier
+
+from app.config import get_settings
 from app.processors.base import MediaProcessor, VerificationResult
+from app.storage.s3_client import download_object
+
+logger = logging.getLogger(__name__)
+
+THRESHOLD = 0.30  # SpeechBrain ECAPA typical threshold for positive verification
 
 
 class VoiceBioProcessor(MediaProcessor):
-    """Voice biometrics processor for speaker verification.
+    """Voice biometrics processor using SpeechBrain ECAPA-TDNN for speaker verification."""
 
-    MVP Implementation:
-    - Validates that the file is a readable WAV format
-    - Returns valid=True with mock confidence if the file is valid
-    - Structured for future SpeechBrain integration
-
-    Future Integration Points:
-    - Replace _extract_embeddings() with SpeechBrain encoder
-    - Replace _compare_embeddings() with actual similarity scoring
-    - Add enrollment flow for subject voice profiles
-    """
+    def __init__(self) -> None:
+        logger.info("Loading SpeechBrain ECAPA-TDNN model...")
+        self.classifier = EncoderClassifier.from_hparams(
+            source="speechbrain/spkrec-ecapa-voxceleb",
+            savedir="./pretrained_models/spkrec-ecapa-voxceleb",
+            run_opts={"device": "cpu"},
+        )
+        self.similarity = torch.nn.CosineSimilarity(dim=-1, eps=1e-6)
+        logger.info("Voice model loaded.")
 
     @property
     def name(self) -> str:
-        """Return the processor name."""
         return "voice_bio"
 
     async def verify(
@@ -37,176 +41,74 @@ class VoiceBioProcessor(MediaProcessor):
         profile: str,
         metadata: dict[str, Any] | None = None,
     ) -> VerificationResult:
-        """Verify speaker identity from audio sample.
-
-        Args:
-            media_bytes: WAV audio file content.
-            subject_id: The user identifier to verify against.
-            profile: Verification profile (e.g., 'voice.login.default').
-            metadata: Optional context (e.g., expected duration, quality hints).
-
-        Returns:
-            VerificationResult with validity and confidence score.
-        """
-        # Validate audio format
-        validation_result = self._validate_audio(media_bytes)
-        if not validation_result["valid"]:
+        if len(media_bytes) < 44:
             return VerificationResult(
                 valid=False,
                 confidence=0.0,
-                reason=validation_result["reason"],
-                metadata={"processor": self.name, "error": "invalid_format"},
+                reason="Invalid or empty audio",
+                metadata={},
             )
 
-        # Extract audio metadata
-        audio_info = validation_result.get("audio_info", {})
-
-        # MVP: Mock verification - in production, this would:
-        # 1. Extract voice embeddings using SpeechBrain
-        # 2. Compare against stored embeddings for subject_id
-        # 3. Return actual similarity score
-
-        # Simulate successful verification for valid audio
-        mock_confidence = 0.85
-
-        return VerificationResult(
-            valid=True,
-            confidence=mock_confidence,
-            reason="Voice sample validated successfully (MVP mock verification)",
-            metadata={
-                "processor": self.name,
-                "subject_id": subject_id,
-                "profile": profile,
-                "audio_info": audio_info,
-                "note": "This is a placeholder. Integrate SpeechBrain for real verification.",
-            },
-        )
-
-    def _validate_audio(self, data: bytes) -> dict[str, Any]:
-        """Validate that the data is a readable audio file.
-
-        Currently supports WAV format. Checks for valid RIFF/WAVE header
-        and extracts basic audio properties.
-
-        Args:
-            data: Raw audio file bytes.
-
-        Returns:
-            Dict with 'valid' boolean, 'reason' string, and optional 'audio_info'.
-        """
-        if len(data) < 44:
-            return {
-                "valid": False,
-                "reason": "File too small to be a valid WAV file (minimum 44 bytes header)",
-            }
-
-        # Check WAV header (RIFF....WAVE)
-        if data[:4] != b"RIFF" or data[8:12] != b"WAVE":
-            # Try to detect other formats for better error messages
-            if data[:3] == b"ID3" or data[:2] == b"\xff\xfb":
-                return {
-                    "valid": False,
-                    "reason": "MP3 format detected. Please provide WAV format.",
-                }
-            if data[:4] == b"OggS":
-                return {
-                    "valid": False,
-                    "reason": "OGG format detected. Please provide WAV format.",
-                }
-            return {
-                "valid": False,
-                "reason": "Invalid audio format. Expected WAV file with RIFF/WAVE header.",
-            }
-
         try:
-            # Parse WAV header for audio info
-            # fmt chunk should be at offset 12
-            if data[12:16] != b"fmt ":
-                return {
-                    "valid": False,
-                    "reason": "Invalid WAV format: missing fmt chunk",
-                }
+            evidence_emb = self._extract_embeddings(media_bytes)
 
-            # Parse fmt chunk (little-endian)
-            # Offset 20: audio format (1 = PCM)
-            # Offset 22: number of channels
-            # Offset 24: sample rate
-            # Offset 28: byte rate
-            # Offset 32: block align
-            # Offset 34: bits per sample
+            ref_key = f"references/{subject_id}/enrollment.wav"
+            settings = get_settings()
+            try:
+                ref_bytes = download_object(
+                    bucket=settings.s3_bucket,
+                    key=ref_key,
+                    max_bytes=settings.max_download_bytes,
+                )
+                reference_emb = self._extract_embeddings(ref_bytes)
+            except Exception as e:
+                logger.warning("User %s not enrolled: %s", subject_id, e)
+                return VerificationResult(
+                    valid=False,
+                    confidence=0.0,
+                    reason="User has no voice enrollment (reference not found)",
+                    metadata={"error": "reference_not_found"},
+                )
 
-            audio_format = struct.unpack("<H", data[20:22])[0]
-            num_channels = struct.unpack("<H", data[22:24])[0]
-            sample_rate = struct.unpack("<I", data[24:28])[0]
-            bits_per_sample = struct.unpack("<H", data[34:36])[0]
+            score = self._compare_embeddings(evidence_emb, reference_emb)
+            # Cosine similarity is in [-1, 1]; normalize to [0, 1] and clamp (float can exceed 1.0)
+            confidence = float(max(0.0, min(1.0, (score + 1) / 2)))
+            is_valid = score >= THRESHOLD
 
-            # Calculate approximate duration
-            # Find data chunk
-            data_offset = 36
-            while data_offset < len(data) - 8:
-                chunk_id = data[data_offset : data_offset + 4]
-                chunk_size = struct.unpack("<I", data[data_offset + 4 : data_offset + 8])[0]
-                if chunk_id == b"data":
-                    bytes_per_sample = bits_per_sample // 8
-                    if bytes_per_sample > 0 and num_channels > 0 and sample_rate > 0:
-                        total_samples = chunk_size // (bytes_per_sample * num_channels)
-                        duration_seconds = total_samples / sample_rate
-                    else:
-                        duration_seconds = 0.0
-                    break
-                data_offset += 8 + chunk_size
-            else:
-                duration_seconds = 0.0
+            return VerificationResult(
+                valid=is_valid,
+                confidence=confidence,
+                reason="Verification successful" if is_valid else "Voice does not match",
+                metadata={
+                    "processor": self.name,
+                    "subject_id": subject_id,
+                    "threshold_used": THRESHOLD,
+                },
+            )
 
-            audio_info = {
-                "format": "PCM" if audio_format == 1 else f"format_{audio_format}",
-                "channels": num_channels,
-                "sample_rate": sample_rate,
-                "bits_per_sample": bits_per_sample,
-                "duration_seconds": round(duration_seconds, 2),
-            }
+        except Exception as e:
+            logger.exception("Error in voice verification: %s", e)
+            return VerificationResult(
+                valid=False,
+                confidence=0.0,
+                reason=f"Internal AI error: {e!s}",
+                metadata={"processor": self.name, "subject_id": subject_id},
+            )
 
-            return {
-                "valid": True,
-                "reason": "Valid WAV file",
-                "audio_info": audio_info,
-            }
+    def _extract_embeddings(self, audio_bytes: bytes) -> torch.Tensor:
+        """Convert WAV bytes to waveform tensor then to 192-dim embedding vector."""
+        with io.BytesIO(audio_bytes) as audio_file:
+            data, _sample_rate = sf.read(audio_file, dtype="float32")
+        # data: (samples,) or (samples, channels); we need (1, samples) for model
+        if data.ndim == 1:
+            signal = torch.from_numpy(data).unsqueeze(0)
+        else:
+            signal = torch.from_numpy(data.T).mean(dim=0, keepdim=True)
 
-        except (struct.error, IndexError) as e:
-            return {
-                "valid": False,
-                "reason": f"Error parsing WAV header: {e}",
-            }
+        embeddings = self.classifier.encode_batch(signal)
+        return embeddings
 
-    # Future SpeechBrain integration points:
-
-    async def _extract_embeddings(self, audio_bytes: bytes) -> list[float]:
-        """Extract voice embeddings from audio.
-
-        TODO: Implement with SpeechBrain ECAPA-TDNN or similar model.
-
-        Args:
-            audio_bytes: WAV audio content.
-
-        Returns:
-            Voice embedding vector.
-        """
-        raise NotImplementedError("SpeechBrain integration pending")
-
-    async def _compare_embeddings(
-        self,
-        sample_embedding: list[float],
-        reference_embedding: list[float],
-    ) -> float:
-        """Compare two voice embeddings and return similarity score.
-
-        TODO: Implement with cosine similarity or model-specific metric.
-
-        Args:
-            sample_embedding: Embedding from the verification sample.
-            reference_embedding: Stored reference embedding for the subject.
-
-        Returns:
-            Similarity score between 0.0 and 1.0.
-        """
-        raise NotImplementedError("SpeechBrain integration pending")
+    def _compare_embeddings(self, emb1: torch.Tensor, emb2: torch.Tensor) -> float:
+        """Compute cosine similarity between two embeddings (range -1.0 to 1.0)."""
+        score = self.similarity(emb1, emb2)
+        return score.mean().item()

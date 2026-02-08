@@ -64,3 +64,6 @@ docker-compose.override.yml
 *.tmp
 *.temp
 .cache/
+
+# SpeechBrain / voice model cache (downloaded at runtime or in Docker build)
+pretrained_models/

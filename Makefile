@@ -1,7 +1,7 @@
 # Authentik Media Gateway - Makefile
 # Run `make help` to see available commands
 
-.PHONY: help dev test up down logs clean fmt lint install
+.PHONY: help dev test unit-tests test-cov up down logs clean fmt lint install
 
 # Default target
 help:
@@ -10,7 +10,8 @@ help:
 	@echo "Development:"
 	@echo "  make install  - Install dependencies locally"
 	@echo "  make dev      - Run development server with hot reload"
-	@echo "  make test     - Run pytest test suite"
+	@echo "  make test        - Run pytest test suite"
+	@echo "  make unit-tests  - Run pytest test suite (alias)"
 	@echo "  make fmt      - Format code with ruff"
 	@echo "  make lint     - Run linter checks"
 	@echo ""
@@ -30,13 +31,16 @@ install:
 dev:
 	PYTHONPATH=src uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 
-# Run tests (pytest reads testpaths=["tests"] and pythonpath=["src"] from pyproject.toml)
+# Run tests (use python -m pytest so venv is respected; pyproject.toml sets testpaths and pythonpath)
 test:
-	pytest tests -v --tb=short
+	PYTHONPATH=src python -m pytest tests -v --tb=short
+
+# Alias for test (unit tests)
+unit-tests: test
 
 # Run tests with coverage
 test-cov:
-	pytest tests -v --cov=app --cov-report=term-missing
+	PYTHONPATH=src python -m pytest tests -v --cov=app --cov-report=term-missing
 
 # Format code with ruff
 fmt:

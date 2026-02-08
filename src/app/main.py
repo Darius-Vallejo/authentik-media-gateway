@@ -10,7 +10,7 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from app.api import health, presigned, verify
+from app.api import enroll, health, presigned, verify
 from app.config import get_settings
 
 
@@ -117,6 +117,7 @@ def create_app() -> FastAPI:
     app.include_router(health.router)
     app.include_router(presigned.router)
     app.include_router(verify.router)
+    app.include_router(enroll.router)
 
     return app
 
